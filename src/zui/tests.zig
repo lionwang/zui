@@ -33,7 +33,7 @@ fn freshRoot(alloc: Allocator) !*node_mod.Node {
 fn render(root: *node_mod.Node, alloc: Allocator, el: element.Element, width: f32, height: f32) !void {
     var frame_arena = std.heap.ArenaAllocator.init(alloc);
     defer frame_arena.deinit();
-    _ = try reconcile.reconcile(alloc, frame_arena.allocator(), root, el);
+    _ = try reconcile.reconcile(alloc, frame_arena.allocator(), root, el, null);
     try layout.layout(root, .{
         .font_collection = dummyFontCollection(),
         .arena = frame_arena.allocator(),
@@ -148,6 +148,61 @@ test "justify_content center centers a row" {
     try std.testing.expectApproxEqAbs(@as(f32, 40), root.children.items[0].layout.x, 0.01);
 }
 
+test "absolute children pin to the content box and stay out of the flow" {
+    const alloc = std.testing.allocator;
+
+    const tree = element.Element{ .rect = .{
+        .style = .{ .direction = .column, .width = 100, .height = 100, .padding = .all(10), .align_items = .flex_start },
+        .children = &.{
+            .{ .rect = .{ .style = .{ .width = 20, .height = 20 } } },
+            .{ .rect = .{ .style = .{
+                .position = .absolute,
+                .left = 5,
+                .top = 15,
+                .width = 30,
+                .height = 8,
+            } } },
+        },
+    } };
+
+    const root = try freshRoot(alloc);
+    defer root.destroy();
+    try render(root, alloc, tree, 200, 200);
+
+    const kids = root.children.items;
+    try std.testing.expectEqual(@as(usize, 2), kids.len);
+    // The flow child sits at the content origin and is unaffected by the
+    // absolute one (no gap, no shared free space).
+    try std.testing.expectApproxEqAbs(@as(f32, 10), kids[0].layout.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 10), kids[0].layout.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 20), kids[0].layout.w, 0.01);
+
+    // The absolute child is pinned relative to the content origin (10,10).
+    try std.testing.expectApproxEqAbs(@as(f32, 15), kids[1].layout.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 25), kids[1].layout.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 30), kids[1].layout.w, 0.01);
+}
+
+test "left + right stretches an absolute child to the content box" {
+    const alloc = std.testing.allocator;
+
+    const tree = element.Element{ .rect = .{
+        .style = .{ .direction = .column, .width = 100, .height = 100 },
+        .children = &.{
+            .{ .rect = .{ .style = .{ .position = .absolute, .left = 10, .right = 20, .top = 4, .bottom = 6 } } },
+        },
+    } };
+
+    const root = try freshRoot(alloc);
+    defer root.destroy();
+    try render(root, alloc, tree, 200, 200);
+
+    const abs = root.children.items[0];
+    try std.testing.expectApproxEqAbs(@as(f32, 10), abs.layout.x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 100 - 10 - 20), abs.layout.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 100 - 4 - 6), abs.layout.h, 0.01);
+}
+
 test "hook state survives reconciliation" {
     const alloc = std.testing.allocator;
 
@@ -170,7 +225,7 @@ test "hook state survives reconciliation" {
         var frame_arena = std.heap.ArenaAllocator.init(alloc);
         defer frame_arena.deinit();
         const el = context_mod.makeComponent("counter", S.render);
-        _ = try reconcile.reconcile(alloc, frame_arena.allocator(), root, el);
+        _ = try reconcile.reconcile(alloc, frame_arena.allocator(), root, el, null);
     }
 
     // The component node expanded into its rect child.

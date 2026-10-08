@@ -1,8 +1,6 @@
 //! Ergonomic Zig bindings over the zsk C ABI (Skia).
 const std = @import("std");
-const c = @cImport({
-    @cInclude("zsk.h");
-});
+const c = @import("zsk");
 
 /// Initialize the MSVC dynamic-CRT state that Zig's entry point skips
 /// (onexit table + C/C++ static initializers). Must be called once before
@@ -14,7 +12,16 @@ pub fn initCrt() void {
 /// Encode a raw RGBA (0xAARRGGBB, row-major) buffer to a PNG file.
 pub fn encodePng(rgba: []const u8, w: i32, h: i32, path: [:0]const u8) bool {
     return c.zsk_encode_png(rgba.ptr, w, h, path.ptr) != 0;
-}pub const Context = struct {
+}
+
+/// Monotonic milliseconds since boot. The single clock zui needs for
+/// animations and timers (Zig 0.16's `std.time` no longer exposes one
+/// without an `Io` instance).
+pub fn millis() u64 {
+    return c.zsk_millis();
+}
+
+pub const Context = struct {
     handle: *c.zsk_context,
 
     pub fn createGl() !Context {
@@ -113,7 +120,7 @@ pub const Paint = struct {
         c.zsk_paint_set_color(self.handle, color);
     }
     pub fn setStyle(self: *Paint, style: PaintStyle) void {
-        c.zsk_paint_set_style(self.handle, @intFromEnum(style));
+        c.zsk_paint_set_style(self.handle, @backingInt(style));
     }
     pub fn setStrokeWidth(self: *Paint, width: f32) void {
         c.zsk_paint_set_stroke_width(self.handle, width);
@@ -122,7 +129,7 @@ pub const Paint = struct {
         c.zsk_paint_set_aa(self.handle, if (enabled) 1 else 0);
     }
     pub fn setBlendMode(self: *Paint, mode: BlendMode) void {
-        c.zsk_paint_set_blend_mode(self.handle, @intFromEnum(mode));
+        c.zsk_paint_set_blend_mode(self.handle, @backingInt(mode));
     }
     pub fn setAlpha(self: *Paint, alpha: u8) void {
         c.zsk_paint_set_alpha(self.handle, alpha);
@@ -274,8 +281,8 @@ pub const TextStyle = struct {
         s.font_size = self.font_size;
         s.height_multiplier = self.height_multiplier;
         s.letter_spacing = self.letter_spacing;
-        s.weight = @intFromEnum(self.weight);
-        s.slant = @intFromEnum(self.slant);
+        s.weight = @backingInt(self.weight);
+        s.slant = @backingInt(self.slant);
         s.decoration = @as(c_int, if (self.decoration.underline) c.ZSK_DECOR_UNDERLINE else 0) |
             @as(c_int, if (self.decoration.overline) c.ZSK_DECOR_OVERLINE else 0) |
             @as(c_int, if (self.decoration.strikethrough) c.ZSK_DECOR_STRIKETHROUGH else 0);
@@ -298,8 +305,8 @@ pub const ParagraphStyle = struct {
 
     pub fn toC(self: ParagraphStyle) c.zsk_paragraph_style {
         var s: c.zsk_paragraph_style = std.mem.zeroes(c.zsk_paragraph_style);
-        s.direction = @intFromEnum(self.direction);
-        s.alignment = @intFromEnum(self.alignment);
+        s.direction = @backingInt(self.direction);
+        s.alignment = @backingInt(self.alignment);
         s.max_lines = self.max_lines;
         s.ellipsis = if (self.ellipsis) 1 else 0;
         s.height_multiplier = self.height_multiplier;
@@ -361,7 +368,48 @@ pub const Paragraph = struct {
     pub fn lineCount(self: Paragraph) i32 {
         return c.zsk_paragraph_line_count(self.handle);
     }
+
+    /// Index (in UTF-16 code units, as SkParagraph measures text) of the
+    /// glyph at the paragraph-local coordinate; clamps to the text ends.
+    pub fn glyphPosition(self: Paragraph, dx: f32, dy: f32) i32 {
+        return c.zsk_paragraph_glyph_position(self.handle, dx, dy);
+    }
+
+    /// Bounding boxes of the glyphs between `start` and `end` (UTF-16 units,
+    /// `end` exclusive), at most `out.len / 4` of them. Returns the count
+    /// written.
+    pub fn rectsForRange(self: Paragraph, start: usize, end: usize, out: []f32) usize {
+        if (out.len < 4) return 0;
+        const n = c.zsk_paragraph_rects_for_range(
+            self.handle,
+            @intCast(start),
+            @intCast(end),
+            out.ptr,
+            @intCast(out.len / 4),
+        );
+        return @intCast(n);
+    }
 };
+
+/// Replace the Windows clipboard text (UTF-8 in, CF_UNICODETEXT out).
+pub fn clipboardSetText(text: []const u8) bool {
+    return c.zsk_clipboard_set_text(text.ptr, text.len) != 0;
+}
+
+/// Read the Windows clipboard text as UTF-8. Returns a slice of `buf`
+/// (empty when the clipboard holds no text).
+pub fn clipboardGetText(buf: []u8) []const u8 {
+    if (buf.len == 0) return &.{};
+    const n = c.zsk_clipboard_get_text(buf.ptr, buf.len);
+    return buf[0..@intCast(n)];
+}
+
+/// Is the clipboard open in another process, so copy and paste would fail
+/// (after the built-in retries)? A side-effect-free probe: open and close
+/// again without touching the contents.
+pub fn clipboardLocked() bool {
+    return c.zsk_clipboard_locked() != 0;
+}
 
 pub const Size = struct { width: i32 = 0, height: i32 = 0 };
 
@@ -387,10 +435,22 @@ pub fn argb(alpha: u8, red: u8, green: u8, blue: u8) u32 {
     return (@as(u32, alpha) << 24) | (@as(u32, red) << 16) | (@as(u32, green) << 8) | blue;
 }
 pub const rgb = struct {
-    pub fn black() u32 { return 0xFF000000; }
-    pub fn white() u32 { return 0xFFFFFFFF; }
-    pub fn red() u32 { return 0xFFFF0000; }
-    pub fn green() u32 { return 0xFF00AA00; }
-    pub fn blue() u32 { return 0xFF3366CC; }
-    pub fn gray() u32 { return 0xFF888888; }
+    pub fn black() u32 {
+        return 0xFF000000;
+    }
+    pub fn white() u32 {
+        return 0xFFFFFFFF;
+    }
+    pub fn red() u32 {
+        return 0xFFFF0000;
+    }
+    pub fn green() u32 {
+        return 0xFF00AA00;
+    }
+    pub fn blue() u32 {
+        return 0xFF3366CC;
+    }
+    pub fn gray() u32 {
+        return 0xFF888888;
+    }
 };

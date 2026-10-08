@@ -1,0 +1,12 @@
+# Zig 0.17's formatter normalizes every file to LF; without this a Windows
+# checkout (core.autocrlf) rewrites the tree to CRLF and `zig fmt --check`
+# fails on every fresh clone.
+* text=auto eol=lf
+
+# Generated artifacts and vendored binaries stay byte-identical.
+*.png binary
+*.lib binary
+*.dll binary
+*.exe binary
+*.dat binary
+*.icudtl binary

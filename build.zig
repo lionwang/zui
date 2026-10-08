@@ -5,12 +5,13 @@ const SkiaLibs = [_][]const u8{
 };
 
 const SystemLibs = [_][]const u8{
-    "opengl32", "user32", "gdi32", "dwmapi", "imm32",
-    "shell32", "ole32", "advapi32", "d3d12", "d3dcompiler", "dxgi",
+    "opengl32", "user32", "gdi32",    "dwmapi",    "imm32",
+    "shell32",  "ole32",  "advapi32", "d3d12",     "d3dcompiler",
+    "dxgi",
     // uuid.lib provides IID_IUnknown (referenced by Skia's DirectWrite font manager).
-    "uuid",
+        "uuid",
     // Dynamic CRT: import libraries for MSVCP140 / VCRUNTIME140 / ucrtbase.
-    "msvcprt", "vcruntime", "ucrt",
+      "msvcprt",  "vcruntime", "ucrt",
     // Static CRT pieces that are never exported from the DLLs: the VCStartup
     // objects (operator new/delete, _Init_thread_*, atexit) live in msvcrt.lib
     // and the compiler support routines (security cookie, GS handlers, _setjmp)
@@ -20,12 +21,12 @@ const SystemLibs = [_][]const u8{
 };
 
 const GlfwSources = [_][]const u8{
-    "context.c",        "init.c",          "input.c",          "monitor.c",
-    "platform.c",       "vulkan.c",        "window.c",         "wgl_context.c",
-    "egl_context.c",    "osmesa_context.c",
-    "win32_init.c",     "win32_joystick.c", "win32_module.c",   "win32_monitor.c",
-    "win32_thread.c",   "win32_time.c",    "win32_window.c",
-    "null_init.c",      "null_joystick.c", "null_monitor.c",   "null_window.c",
+    "context.c",      "init.c",           "input.c",         "monitor.c",
+    "platform.c",     "vulkan.c",         "window.c",        "wgl_context.c",
+    "egl_context.c",  "osmesa_context.c", "win32_init.c",    "win32_joystick.c",
+    "win32_module.c", "win32_monitor.c",  "win32_thread.c",  "win32_time.c",
+    "win32_window.c", "null_init.c",      "null_joystick.c", "null_monitor.c",
+    "null_window.c",
 };
 
 pub fn build(b: *std.Build) void {
@@ -48,63 +49,38 @@ pub fn build(b: *std.Build) void {
     zui_mod.addIncludePath(b.path("vendor/glfw/include"));
     addNativeIncludes(b, zui_mod);
 
+    // ---- C headers, translated at build time (0.17 removed @cImport) ----
+    // `window.zig` / `app.zig` use `@import("glfw")`, `skia.zig` uses
+    // `@import("zsk")`. `link_libc` stays off: zui links the MSVC CRT
+    // manually and needs Zig's own entry point (`wWinMainCRTStartup`), not
+    // the CRT's `main` (which would require a WinMain for the GUI subsystem).
+    const glfw_c = b.addTranslateC(.{
+        .root_source_file = b.path("vendor/glfw/include/GLFW/glfw3.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    glfw_c.addIncludePath(b.path("vendor/glfw/include"));
+    // clang needs the MSVC / Windows SDK system headers for <GL/gl.h> etc.
+    for (nativeIncludeDirs(b)) |inc| glfw_c.addSystemIncludePath(.{ .cwd_relative = inc });
+    zui_mod.addImport("glfw", glfw_c.createModule());
+
+    const zsk_c = b.addTranslateC(.{
+        .root_source_file = b.path("src/zsk.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = false,
+    });
+    for (nativeIncludeDirs(b)) |inc| zsk_c.addSystemIncludePath(.{ .cwd_relative = inc });
+    zui_mod.addImport("zsk", zsk_c.createModule());
+
     // ---- Skia C++ wrapper, compiled with MSVC's cl.exe ----
     const zsk_obj = compileMsvcCpp(b, "src/zsk.cpp", "zsk.obj", &.{"vendor/skia"});
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("examples/counter/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_mod.addImport("zui", zui_mod);
-    exe_mod.addIncludePath(b.path("vendor/glfw/include"));
-    addNativeIncludes(b, exe_mod);
-    for (GlfwSources) |src| {
-        exe_mod.addCSourceFile(.{
-            .file = b.path(b.fmt("vendor/glfw/src/{s}", .{src})),
-            .flags = &.{ "-D_GLFW_WIN32", "-D_CRT_SECURE_NO_WARNINGS" },
-        });
-    }
-    exe_mod.addObjectFile(zsk_obj);
-    exe_mod.addLibraryPath(b.path("vendor/skia-binaries"));
-    addWindowsKitsLibPath(b, exe_mod);
-    addMsvcLibPath(b, exe_mod);
-    for (SkiaLibs) |lib| exe_mod.linkSystemLibrary(lib, .{});
-    for (SystemLibs) |lib| exe_mod.linkSystemLibrary(lib, .{});
-
-    const exe = b.addExecutable(.{
-        .name = "zui_demo",
-        .root_module = exe_mod,
-    });
-    b.installArtifact(exe);
-
-    // ---- headless render check ----
-    const check_mod = b.createModule(.{
-        .root_source_file = b.path("examples/check/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    check_mod.addImport("zui", zui_mod);
-    check_mod.addIncludePath(b.path("vendor/glfw/include"));
-    addNativeIncludes(b, check_mod);
-    for (GlfwSources) |src| {
-        check_mod.addCSourceFile(.{
-            .file = b.path(b.fmt("vendor/glfw/src/{s}", .{src})),
-            .flags = &.{ "-D_GLFW_WIN32", "-D_CRT_SECURE_NO_WARNINGS" },
-        });
-    }
-    check_mod.addObjectFile(zsk_obj);
-    check_mod.addLibraryPath(b.path("vendor/skia-binaries"));
-    addWindowsKitsLibPath(b, check_mod);
-    addMsvcLibPath(b, check_mod);
-    for (SkiaLibs) |lib| check_mod.linkSystemLibrary(lib, .{});
-    for (SystemLibs) |lib| check_mod.linkSystemLibrary(lib, .{});
-
-    const check_exe = b.addExecutable(.{
-        .name = "zui_check",
-        .root_module = check_mod,
-    });
-    b.installArtifact(check_exe);
+    const exe = addApp(b, "zui_demo", "examples/counter/main.zig", zui_mod, target, optimize, zsk_obj, true);
+    const check_exe = addApp(b, "zui_check", "examples/check/main.zig", zui_mod, target, optimize, zsk_obj, false);
+    const wechat_exe = addApp(b, "zui_wechat", "examples/wechat/main.zig", zui_mod, target, optimize, zsk_obj, true);
+    const gallery_exe = addApp(b, "zui_gallery", "examples/gallery/main.zig", zui_mod, target, optimize, zsk_obj, true);
 
     const run_check = b.addRunArtifact(check_exe);
     run_check.step.dependOn(b.getInstallStep());
@@ -116,11 +92,29 @@ pub fn build(b: *std.Build) void {
     const icu = b.addInstallFileWithDir(b.path("vendor/skia-binaries/icudtl.dat"), .bin, "icudtl.dat");
     b.getInstallStep().dependOn(&icu.step);
 
+    // The WeChat app icon: `AppConfig.icon = "wechat.ico"` is resolved
+    // relative to the executable directory, so install it next to the exe.
+    // Regenerate with `node examples/wechat/assets/make_icon.mjs`.
+    const icon = b.addInstallFileWithDir(b.path("examples/wechat/assets/icon.ico"), .bin, "wechat.ico");
+    b.getInstallStep().dependOn(&icon.step);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the demo app");
     run_step.dependOn(&run_cmd.step);
+
+    const run_wechat = b.addRunArtifact(wechat_exe);
+    run_wechat.step.dependOn(b.getInstallStep());
+    run_wechat.addPassthruArgs();
+    const wechat_step = b.step("wechat", "Run the WeChat chat example");
+    wechat_step.dependOn(&run_wechat.step);
+
+    const run_gallery = b.addRunArtifact(gallery_exe);
+    run_gallery.step.dependOn(b.getInstallStep());
+    run_gallery.addPassthruArgs();
+    const gallery_step = b.step("gallery", "Run the component gallery");
+    gallery_step.dependOn(&run_gallery.step);
 
     // ---- unit tests ----
     const test_mod = b.createModule(.{
@@ -128,11 +122,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    // The tests import skia, which @cImports the Skia C ABI header, so the
-    // include paths must match the library module even though the test binary
-    // never links against Skia (only rect layout is exercised).
-    test_mod.addIncludePath(b.path("src"));
-    test_mod.addIncludePath(b.path("vendor/skia"));
+    // The tests compile the library sources directly through file imports,
+    // so the translate-c modules behind `@import("glfw")` / `@import("zsk")`
+    // must be reachable from the test module too.
+    test_mod.addImport("glfw", glfw_c.createModule());
+    test_mod.addImport("zsk", zsk_c.createModule());
     addNativeIncludes(b, test_mod);
     test_mod.addCSourceFile(.{
         .file = b.path("src/zui/test_stubs.c"),
@@ -145,6 +139,51 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run library unit tests");
     test_step.dependOn(&run_tests.step);
+}
+
+/// Build one zui application executable: a Zig root module plus the GLFW
+/// win32 sources, the MSVC-compiled zsk wrapper and the Skia libraries.
+/// `gui` links it as a Windows GUI subsystem app: opening the executable
+/// then shows no console window (the check driver stays a console app so
+/// its diagnostics still print).
+fn addApp(
+    b: *std.Build,
+    name: []const u8,
+    root: []const u8,
+    zui_mod: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    zsk_obj: std.Build.LazyPath,
+    gui: bool,
+) *std.Build.Step.Compile {
+    const app_mod = b.createModule(.{
+        .root_source_file = b.path(root),
+        .target = target,
+        .optimize = optimize,
+    });
+    app_mod.addImport("zui", zui_mod);
+    app_mod.addIncludePath(b.path("vendor/glfw/include"));
+    addNativeIncludes(b, app_mod);
+    for (GlfwSources) |src| {
+        app_mod.addCSourceFile(.{
+            .file = b.path(b.fmt("vendor/glfw/src/{s}", .{src})),
+            .flags = &.{ "-D_GLFW_WIN32", "-D_CRT_SECURE_NO_WARNINGS" },
+        });
+    }
+    app_mod.addObjectFile(zsk_obj);
+    app_mod.addLibraryPath(b.path("vendor/skia-binaries"));
+    addWindowsKitsLibPath(b, app_mod);
+    addMsvcLibPath(b, app_mod);
+    for (SkiaLibs) |lib| app_mod.linkSystemLibrary(lib, .{});
+    for (SystemLibs) |lib| app_mod.linkSystemLibrary(lib, .{});
+
+    const app_exe = b.addExecutable(.{
+        .name = name,
+        .root_module = app_mod,
+    });
+    if (gui) app_exe.subsystem = .windows;
+    b.installArtifact(app_exe);
+    return app_exe;
 }
 
 /// Compile a single C++ translation unit with MSVC's cl.exe and return the
@@ -163,12 +202,12 @@ fn compileMsvcCpp(
         \\workload (any 2019/2022 edition).
     );
 
-    const bat_path = b.pathFromRoot(".compile_cl.bat");
+    const bat_path = ".compile_cl.bat";
 
     var includes: std.ArrayList(u8) = .empty;
     for (include_dirs) |inc| {
         includes.appendSlice(b.allocator, " /I \"") catch @panic("OOM");
-        includes.appendSlice(b.allocator, b.pathFromRoot(inc)) catch @panic("OOM");
+        includes.appendSlice(b.allocator, inc) catch @panic("OOM");
         includes.append(b.allocator, '"') catch @panic("OOM");
     }
 

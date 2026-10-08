@@ -48,6 +48,11 @@ pub const layout = @import("layout/layout.zig");
 pub const paint = @import("paint.zig");
 pub const app = @import("app.zig");
 pub const widgets = @import("widgets/widgets.zig");
+pub const tray = @import("tray.zig");
+/// Raw Win32 bindings (handles, icon loading, styles). Windows only; here
+/// for power users - e.g. `zui.win32.Icon` to build an icon for
+/// `Window.setIcon` from something other than `AppConfig.icon`.
+pub const win32 = @import("win32.zig");
 
 pub const Window = window.Window;
 pub const Element = element.Element;
@@ -55,8 +60,11 @@ pub const Style = element.Style;
 pub const Edges = element.Edges;
 pub const Handler = element.Handler;
 pub const Context = context.Context;
+pub const State = context.State;
 pub const App = app.App;
 pub const AppConfig = app.AppConfig;
+pub const Tray = tray.Tray;
+pub const MenuItem = tray.MenuItem;
 
 /// Ergonomic element constructors (`ui.column`, `ui.text`, ...).
 pub const ui = widgets;

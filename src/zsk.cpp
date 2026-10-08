@@ -2,6 +2,10 @@
 #include "zsk.h"
 #include <cstdio>
 #include <cstring>
+#include <algorithm> // std::min
+// NOMINMAX: windows.h's min/max macros clash with Skia's use of std::min/max.
+#define NOMINMAX
+#include <windows.h> // GetTickCount64, clipboard
 
 // ---------------------------------------------------------------------------
 // CRT startup stubs.
@@ -98,8 +102,6 @@ void zsk_init_crt(void) {
 #include "modules/skparagraph/include/ParagraphStyle.h"
 #include "modules/skparagraph/include/TextStyle.h"
 
-#include <cstdio>
-#include <cstring>
 #include <new>
 #include <string>
 #include <vector>
@@ -207,6 +209,12 @@ ZSK_EXPORT int zsk_encode_png(const void* rgba, int width, int height, const cha
     SkFILEWStream out(path);
     if (!out.isValid()) return 0;
     return SkPngEncoder::Encode(&out, pm, {}) ? 1 : 0;
+}
+
+// Monotonic milliseconds since boot (GetTickCount64). Zig 0.16 dropped the
+// std.time wall clock in favor of the Io struct, so zui gets its clock here.
+ZSK_EXPORT uint64_t zsk_millis(void) {
+    return GetTickCount64();
 }
 
 /* ------------------------------------------------------------------ */
@@ -415,7 +423,12 @@ ZSK_EXPORT void zsk_paragraph_builder_push_style(zsk_paragraph_builder* b, const
     skia::textlayout::TextStyle ts;
     if ((s->color & 0xFF000000) != 0 || s->color != 0) ts.setColor(s->color);
     if (s->font_size > 0) ts.setFontSize(s->font_size);
-    if (s->height_multiplier > 0) ts.setHeight(s->height_multiplier);
+    // `setHeight` alone is ignored: the multiplier only takes effect with
+    // the override flag, so the paragraph honors the requested line height.
+    if (s->height_multiplier > 0) {
+        ts.setHeight(s->height_multiplier);
+        ts.setHeightOverride(true);
+    }
     if (s->letter_spacing != 0) ts.setLetterSpacing(s->letter_spacing);
     if (s->weight >= 0) ts.setFontStyle(SkFontStyle(s->weight, SkFontStyle::kNormal_Width,
         s->slant == ZSK_SLANT_ITALIC ? SkFontStyle::kItalic_Slant : SkFontStyle::kUpright_Slant));
@@ -472,6 +485,105 @@ ZSK_EXPORT float zsk_paragraph_alphabetic_baseline(zsk_paragraph* p) {
 }
 ZSK_EXPORT int zsk_paragraph_line_count(zsk_paragraph* p) {
     return p && p->paragraph ? (int)p->paragraph->lineNumber() : 0;
+}
+
+// Text selection: glyph hit testing (UTF-16 code units) and range boxes.
+ZSK_EXPORT int zsk_paragraph_glyph_position(zsk_paragraph* p, float dx, float dy) {
+    if (!p || !p->paragraph) return 0;
+    auto pos = p->paragraph->getGlyphPositionAtCoordinate(dx, dy);
+    return pos.position;
+}
+// Each rect is extended to the full line box its glyphs sit in: the tight
+// bounds hug the glyphs and float inside the line's spacing, while a text
+// selection is expected to cover the whole line (like an editor's).
+ZSK_EXPORT int zsk_paragraph_rects_for_range(zsk_paragraph* p, unsigned start, unsigned end,
+                                             float* out_rects, int max_count) {
+    if (!p || !p->paragraph || !out_rects || max_count <= 0) return 0;
+    auto boxes = p->paragraph->getRectsForRange(start, end,
+        skia::textlayout::RectHeightStyle::kTight,
+        skia::textlayout::RectWidthStyle::kTight);
+    std::vector<skia::textlayout::LineMetrics> metrics;
+    p->paragraph->getLineMetrics(metrics);
+    const int n = (int)std::min<size_t>(boxes.size(), (size_t)max_count);
+    for (int i = 0; i < n; i++) {
+        const float mid = (boxes[i].rect.fTop + boxes[i].rect.fBottom) * 0.5f;
+        for (const auto& lm : metrics) {
+            const float top = (float)(lm.fBaseline - lm.fAscent);
+            const float bottom = (float)(lm.fBaseline + lm.fDescent);
+            if (mid >= top && mid <= bottom) {
+                boxes[i].rect.fTop = top;
+                boxes[i].rect.fBottom = bottom;
+                break;
+            }
+        }
+        out_rects[i * 4 + 0] = boxes[i].rect.fLeft;
+        out_rects[i * 4 + 1] = boxes[i].rect.fTop;
+        out_rects[i * 4 + 2] = boxes[i].rect.fRight;
+        out_rects[i * 4 + 3] = boxes[i].rect.fBottom;
+    }
+    return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Clipboard                                                           */
+/* ------------------------------------------------------------------ */
+
+// UTF-8 text in and out of the Windows clipboard (as CF_UNICODETEXT).
+// Open the clipboard, retrying for a while: some other process watching the
+// clipboard (history service, shell, an IME) may hold it open and deny
+// access with ERROR_ACCESS_DENIED. Copy and paste silently failing is much
+// worse than a short wait, so keep trying for up to ~1.5 s.
+static bool openClipboardRetry() {
+    for (int i = 0; i < 60; ++i) {
+        if (OpenClipboard(nullptr)) return true;
+        if (i + 1 < 60) Sleep(25);
+    }
+    return false;
+}
+
+// Is the clipboard currently opened by another process? A side-effect-free
+// probe of availability so callers (and tests) can skip clipboard work
+// instead of failing: some monitoring service may hold it open for a long
+// time.
+ZSK_EXPORT int zsk_clipboard_locked() {
+    if (OpenClipboard(nullptr)) {
+        CloseClipboard();
+        return 0;
+    }
+    return 1;
+}
+
+ZSK_EXPORT int zsk_clipboard_set_text(const char* utf8, size_t len) {
+    if (!utf8 || !openClipboardRetry()) return 0;
+    EmptyClipboard();
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, (int)len, nullptr, 0);
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (size_t)(wlen + 1) * sizeof(wchar_t));
+    if (!g) { CloseClipboard(); return 0; }
+    auto* wbuf = (wchar_t*)GlobalLock(g);
+    MultiByteToWideChar(CP_UTF8, 0, utf8, (int)len, wbuf, wlen);
+    wbuf[wlen] = L'\0';
+    GlobalUnlock(g);
+    const bool ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr;
+    CloseClipboard();
+    return ok ? 1 : 0;
+}
+
+ZSK_EXPORT size_t zsk_clipboard_get_text(char* out_utf8, size_t cap) {
+    if (!out_utf8 || cap < 1 || !openClipboardRetry()) return 0;
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (!h) { CloseClipboard(); return 0; }
+    auto* wbuf = (const wchar_t*)GlobalLock(h);
+    size_t n = 0;
+    if (wbuf) {
+        const int wlen = lstrlenW(wbuf);
+        int written = WideCharToMultiByte(CP_UTF8, 0, wbuf, wlen, out_utf8, (int)cap - 1, nullptr, nullptr);
+        if (written < 0) written = 0;
+        out_utf8[written] = '\0';
+        n = (size_t)written;
+        GlobalUnlock(h);
+    }
+    CloseClipboard();
+    return n;
 }
 
 /* ------------------------------------------------------------------ */

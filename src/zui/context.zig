@@ -10,6 +10,7 @@
 const std = @import("std");
 const element = @import("element.zig");
 const node = @import("node.zig");
+const window_mod = @import("window.zig");
 
 pub const Context = struct {
     /// Per-frame arena used to build the element tree. Never use it for
@@ -20,6 +21,11 @@ pub const Context = struct {
     /// Props boxed by `Context.component`, handed to the render function.
     props: ?*anyopaque = null,
     hook_index: usize = 0,
+    /// The application window when the tree is rendered by `App` (null for
+    /// the pure layout tests). Lets components reach the chrome they are
+    /// responsible for - a title bar rendered inside the tree needs the
+    /// window handle to minimize / maximize / close it.
+    window: ?*window_mod.Window = null,
 
     /// Read / write stateful value owned by this component's node.
     ///
@@ -46,17 +52,6 @@ pub const Context = struct {
         return slot.*.?;
     }
 
-    /// Build a parameterized component element. Props are copied into the
-    /// frame arena and expanded when the element tree is reconciled.
-    pub fn component(
-        self: *Context,
-        comptime name: []const u8,
-        props: anytype,
-        comptime f: fn (@TypeOf(props)) element.Element,
-    ) !element.Element {
-        return element.componentProps(self.arena, name, props, f);
-    }
-
     /// Acquire (or create) the typed slot for the current hook index.
     fn hookSlot(self: *Context, comptime T: type, initial: T) *T {
         const idx = self.hook_index;
@@ -78,17 +73,34 @@ pub const Context = struct {
         }
         return @as(*T, @ptrCast(@alignCast(n.hooks.items[idx].ptr)));
     }
+
+    /// Build a component element from a render function that takes no props.
+    ///
+    /// ```zig
+    /// fn counter(ctx: *Context) Element {
+    ///     var count = ctx.useState(i32, 0);
+    ///     ...
+    /// }
+    /// return ctx.component("counter", counter);
+    /// ```
+    pub fn component(self: *Context, comptime name: []const u8, comptime f: fn (*Context) element.Element) element.Element {
+        _ = self;
+        return makeComponent(name, f);
+    }
+
+    /// Build a component element with props. The props are boxed in the
+    /// per-frame arena, which stays alive until the tree is reconciled.
+    pub fn componentProps(
+        self: *Context,
+        comptime name: []const u8,
+        props: anytype,
+        comptime f: fn (*Context, @TypeOf(props)) element.Element,
+    ) element.Element {
+        return makeComponentProps(self.arena, name, props, f) catch .{ .none = {} };
+    }
 };
 
 /// Build a component element from a render function that takes no props.
-///
-/// ```zig
-/// fn counter(ctx: *Context) Element {
-///     var count = ctx.useState(i32, 0);
-///     ...
-/// }
-/// return ctx.component("counter", counter);
-/// ```
 pub fn makeComponent(comptime name: []const u8, comptime f: fn (*Context) element.Element) element.Element {
     const Wrapper = struct {
         fn run(ctx: *anyopaque, _: *anyopaque) element.Element {
@@ -123,22 +135,6 @@ pub fn makeComponentProps(
         .render = Wrapper.run,
         .props = boxed,
     } };
-}
-
-/// `Context` method form of `makeComponent`.
-pub fn component(self: *Context, comptime name: []const u8, comptime f: fn (*Context) element.Element) element.Element {
-    _ = self;
-    return makeComponent(name, f);
-}
-
-/// `Context` method form of `makeComponentProps`.
-pub fn componentProps(
-    self: *Context,
-    comptime name: []const u8,
-    props: anytype,
-    comptime f: fn (*Context, @TypeOf(props)) element.Element,
-) element.Element {
-    return makeComponentProps(self.arena, name, props, f) catch .{ .none = {} };
 }
 /// A handle to a stateful value. The handle is cheap to copy; the underlying
 /// storage is owned by the retained node and stays valid between frames.

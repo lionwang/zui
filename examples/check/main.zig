@@ -134,7 +134,7 @@ pub fn main() !void {
     // ---- hover: moving over the button must switch to the hand cursor ----
     win.queue.push(.{ .cursor_move = .{ .x = cx, .y = cy } });
     try application.frame();
-    const hand_created = win.cursors[@intFromEnum(zui.window.CursorShape.hand)] != null;
+    const hand_created = win.cursors[@backingInt(zui.window.CursorShape.hand)] != null;
     std.debug.print("HOVER hand_cursor={}\n", .{hand_created});
     if (!hand_created) {
         std.debug.print("HOVER_FAIL: cursor did not change over the button\n", .{});
@@ -219,7 +219,8 @@ fn onFrame(buf: []const u8, w: i32, h: i32) void {
         std.debug.print("PNG_FAIL: could not write screenshot.png\n", .{});
     } else {
         std.debug.print("PNG_OK: wrote screenshot.png ({d}x{d})\n", .{ w, h });
-    }    if (content < 500) {
+    }
+    if (content < 500) {
         result_ok = false;
         result_msg = "too little content drawn";
         return;

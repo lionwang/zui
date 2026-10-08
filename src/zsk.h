@@ -1,7 +1,7 @@
 // zsk - a thin C ABI over the parts of Skia that zui needs.
 //
 // The implementation (zsk.cpp) is compiled with MSVC against Skia's C++ headers;
-// the Zig side of zui consumes this header via @cImport.
+// the Zig side of zui consumes this header through `addTranslateC` in build.zig.
 #ifndef ZSK_H
 #define ZSK_H
 
@@ -207,6 +207,32 @@ float zsk_paragraph_max_intrinsic_width(zsk_paragraph*);
 float zsk_paragraph_alphabetic_baseline(zsk_paragraph*);
 int zsk_paragraph_line_count(zsk_paragraph*);
 
+// Text selection support. The glyph index (in UTF-16 code units, matching
+// SkParagraph) at the given paragraph-local coordinate; clamps to the text
+// ends.
+int zsk_paragraph_glyph_position(zsk_paragraph*, float dx, float dy);
+
+// Bounding boxes (left, top, right, bottom quadruples) enclosing the glyphs
+// between start and end (in the same units). Writes at most max_count
+// quadruples; returns the number written.
+int zsk_paragraph_rects_for_range(zsk_paragraph*, unsigned start, unsigned end,
+                                  float* out_rects, int max_count);
+
+/* ------------------------------------------------------------------ */
+/* Clipboard                                                          */
+/* ------------------------------------------------------------------ */
+
+// Sets / gets the Windows clipboard text as UTF-8. `zsk_clipboard_get_text`
+// writes at most `cap - 1` bytes and NUL-terminates; returns the byte count
+// (0 on failure or when the clipboard holds no text). Opening the clipboard
+// is retried for a while, since a monitoring service may hold it open.
+int zsk_clipboard_set_text(const char* utf8, size_t len);
+size_t zsk_clipboard_get_text(char* out_utf8, size_t cap);
+// Is the clipboard currently held open by another process? A
+// side-effect-free probe (opens and closes it again without touching the
+// contents), for callers that prefer to skip clipboard work.
+int zsk_clipboard_locked();
+
 /* ------------------------------------------------------------------ */
 /* Runtime                                                            */
 /* ------------------------------------------------------------------ */
@@ -219,6 +245,12 @@ void zsk_init_crt(void);
 // Encodes an RGBA (0xAARRGGBB row-major, stride = width*4) buffer to a PNG
 // file. Returns 1 on success. Used to produce screenshots for the docs.
 int zsk_encode_png(const void* rgba, int width, int height, const char* path);
+
+// Monotonic milliseconds since boot (GetTickCount64), for timers and
+// animations (caret blinking, scheduled updates). Zig 0.16's `std.time` no
+// longer exposes a wall clock without an `Io` instance, so the C ABI gives
+// zui the one clock it needs.
+uint64_t zsk_millis(void);
 /* ---------------------------------------------------------------------- */
 /* Misc                                                                */
 /* ------------------------------------------------------------------ */

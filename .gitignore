@@ -4,3 +4,4 @@ zig-out/
 *.obj
 *.user
 .vs/
+.compile_cl.bat
